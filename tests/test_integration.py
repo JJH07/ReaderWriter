@@ -74,10 +74,13 @@ class ReaderWriterTests(unittest.TestCase):
             except ProcessLookupError:
                 pass
             try:
-                process.communicate(timeout=3)
+                _, stderr = process.communicate(timeout=3)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.communicate(timeout=3)
+                _, stderr = process.communicate(timeout=3)
+            self.assertNotIn("ERROR: AddressSanitizer", stderr)
+            self.assertNotIn("ERROR: LeakSanitizer", stderr)
+            self.assertNotIn("runtime error:", stderr)
         self.temp.cleanup()
 
     def wait_for(self, predicate, timeout=5):
@@ -336,6 +339,55 @@ class ReaderWriterTests(unittest.TestCase):
         self.assertFalse((self.root / "collision").exists())
         self.assertEqual(set(self.file.read_text().splitlines()),
                          {"original", *(str(i) for i in range(8))})
+
+    def test_background_startup_and_shutdown(self):
+        result = subprocess.run([SERVER, str(self.file), "--socket", str(self.sock)],
+                                cwd=self.root, env=self.env, capture_output=True,
+                                text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        pid = int(result.stdout.split("pid=", 1)[1].strip())
+        try:
+            result = self.run_client("-w")
+            self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            os.kill(pid, signal.SIGTERM)
+            self.wait_for(lambda: not self.sock.exists())
+
+    def test_stale_socket_restart_without_active_editor(self):
+        self.start_server()
+        self.server.kill()
+        self.server.wait(timeout=3)
+        self.assertTrue(self.sock.exists())
+        self.start_server()
+        result = self.run_client("-w")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_read_write_confirmation_yes(self):
+        self.start_server()
+        result = self.run_client("-rw", "-t", input="yes\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("original", result.stdout)
+        self.assertEqual(self.file.read_text(), "original\nedit\n")
+
+    def test_non_traversable_socket_directory_is_reported(self):
+        self.sock.parent.mkdir(mode=0o600)
+        try:
+            result = subprocess.run([SERVER, str(self.file), "-f", "--socket", str(self.sock)],
+                                    cwd=self.root, capture_output=True, text=True, timeout=3)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("directory permissions", result.stderr)
+        finally:
+            self.sock.parent.chmod(0o700)
+
+    def test_default_socket_and_custom_log_directory(self):
+        self.server = self.spawn([SERVER, str(self.file), "-f", "-p", "logs"])
+        self.wait_for(lambda: (self.root / "tmp" / "readerwriter.sock").exists()
+                      or self.server.poll() is not None)
+        self.assertIsNone(self.server.poll())
+        result = subprocess.run([CLIENT, str(self.file), "-w"], cwd=self.root,
+                                env=self.env, capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.root / "logs" / "ssu_log.txt").is_file())
 
 
 if __name__ == "__main__":
