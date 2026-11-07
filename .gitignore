@@ -1,0 +1,6 @@
+/ssu_ofm
+/ssu_vim
+/*.o
+/tmp/
+/ssu_log.txt*
+__pycache__/

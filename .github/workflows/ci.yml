@@ -1,0 +1,31 @@
+name: Linux build and integration tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            target: test
+          - compiler: clang
+            target: test
+          - compiler: gcc
+            target: sanitize
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Build and test
+        run: make CC=${{ matrix.compiler }} ${{ matrix.target }}
+        env:
+          ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+          UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
