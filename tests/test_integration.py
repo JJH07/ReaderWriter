@@ -316,7 +316,7 @@ class OriginalContractTests(unittest.TestCase):
 #include <signal.h>
 #include <unistd.h>
 static int scheduled_flock(int fd, int operation);
-#define flock scheduled_flock
+#define flock(fd, operation) scheduled_flock((fd), (operation))
 #include "ssu_ofm.c"
 #undef flock
 static int scheduled_flock(int fd, int operation)
