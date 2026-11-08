@@ -203,7 +203,18 @@ static void serve(const sigset_t *signals)
         }
         next_owner();
         if (!have_pending && flock(fifofd, LOCK_EX | LOCK_NB) == 0) {
-            /* A writer killed between write and kill cannot send its notice. */
+            /* No live writer can be awaiting consumption while we hold this
+             * lock. A dead writer may have sent SIGUSR1 before releasing it;
+             * discard that notice together with its bytes, before a successor
+             * can write. Otherwise the old sender can consume the new name. */
+            sigset_t requests;
+            sigemptyset(&requests);
+            sigaddset(&requests, SIGUSR1);
+            struct timespec immediate = {0};
+            int notice;
+            do {
+                notice = sigtimedwait(&requests, NULL, &immediate);
+            } while (notice == SIGUSR1 || (notice < 0 && errno == EINTR));
             char stale[4096];
             while (read(fifofd, stale, sizeof(stale)) > 0) {}
             flock(fifofd, LOCK_UN);
