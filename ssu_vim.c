@@ -1,138 +1,96 @@
 #define _GNU_SOURCE
-#include "rw_common.h"
-
-#include <errno.h>
-#include <fcntl.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/stat.h>
-#include <sys/time.h>
-#include <sys/wait.h>
-#include <time.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <sys/file.h>
+#include <sys/ioctl.h>
+#include <time.h>
+#include <errno.h>
 
-static void usage(FILE *stream)
-{
-    fprintf(stream, "Usage: ssu_vim FILE <-r|-w|-rw> [-t] [-s] [-d]\n"
-                    "               [--socket PATH] [--timeout 1..86400]\n"
-                    "EDITOR selects one executable (default: vim; no shell arguments).\n");
-}
+#define BIT_r 1
+#define BIT_w 2
+#define BIT_rw 4
+#define BIT_t 8
+#define BIT_s 16
+#define BIT_d 32
+#define FIFO_FILE "./tmp/fifo"
 
-static int show_file(const char *path)
+static int bitset, temp_created, permission, edit_lock = -1;
+static pid_t ofm;
+static char *filename, tempfile[] = "tempXXXXXX";
+static sigset_t signals, original_mask;
+
+static int parse(int argc, char **argv)
 {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0)
+    if (argc < 3 || (strcmp(argv[2], "-r") != 0 && strcmp(argv[2], "-w") != 0 &&
+                     strcmp(argv[2], "-rw") != 0)) {
+        errno = EINVAL;
+        perror("Read / Write option error. Available = < -r | -w | -rw >\n");
         return -1;
-    fflush(stdout);
-    int result = rw_copy(fd, STDOUT_FILENO);
-    close(fd);
-    return result;
-}
-
-static void show_time(const char *label, time_t seconds)
-{
-    struct tm value;
-    char text[32];
-    if (localtime_r(&seconds, &value) != NULL &&
-        strftime(text, sizeof(text), "%Y-%m-%d %H:%M:%S", &value) != 0)
-        printf("%s: %s\n", label, text);
-}
-
-static long long milliseconds(void)
-{
-    struct timespec now;
-    if (clock_gettime(CLOCK_MONOTONIC, &now) < 0)
-        return -1;
-    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
-}
-
-static int acquire(const char *socket_path, const char *path, long timeout)
-{
-    struct sockaddr_un address;
-    if (rw_address(socket_path, &address) < 0)
-        return -1;
-    int fd = socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0);
-    if (fd < 0)
-        return -1;
-    struct timeval io_timeout = {.tv_sec = 5, .tv_usec = 0};
-    if (setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &io_timeout, sizeof(io_timeout)) < 0 ||
-        connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0)
-        goto fail;
-    struct ucred peer;
-    socklen_t peer_size = sizeof(peer);
-    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &peer, &peer_size) < 0 || peer.uid != geteuid()) {
-        errno = EACCES;
-        goto fail;
     }
-    struct rw_request request = {.magic = RW_MAGIC};
-    memcpy(request.path, path, strlen(path) + 1);
-    ssize_t written;
-    do {
-        written = send(fd, &request, sizeof(request), MSG_NOSIGNAL);
-    } while (written < 0 && errno == EINTR);
-    if (written != (ssize_t)sizeof(request))
-        goto fail;
-    long long start = milliseconds();
-    if (start < 0)
-        goto fail;
-    long long deadline = start + timeout * 1000;
-    for (;;) {
-        long long now = milliseconds();
-        if (now < 0)
-            goto fail;
-        if (now >= deadline) {
-            fprintf(stderr, "Timed out waiting for edit permission\n");
-            errno = ETIMEDOUT;
-            goto fail;
-        }
-        struct pollfd item = {.fd = fd, .events = POLLIN};
-        int ready = poll(&item, 1, (int)(deadline - now));
-        if (ready < 0 && errno == EINTR)
-            continue;
-        if (ready < 0)
-            goto fail;
-        if (ready == 0)
-            continue;
-        if (!(item.revents & POLLIN)) {
-            errno = ECONNRESET;
-            goto fail;
-        }
-        uint32_t status;
-        ssize_t length = recv(fd, &status, sizeof(status), MSG_TRUNC);
-        if (length < 0 && errno == EINTR)
-            continue;
-        if (length != (ssize_t)sizeof(status)) {
-            errno = EPROTO;
-            goto fail;
-        }
-        if (status == RW_GRANTED)
-            return fd;
-        if (status == RW_QUEUED)
-            continue;
-        if (status == RW_BUSY) {
-            fprintf(stderr, "Edit queue is full\n");
-            errno = EBUSY;
-        } else if (status == RW_INVALID) {
-            fprintf(stderr, "File is not managed by this daemon\n");
+    filename = argv[1];
+    for (int i = 2; i < argc; ++i) {
+        if (strcmp(argv[i], "-r") == 0)
+            bitset |= BIT_r;
+        else if (strcmp(argv[i], "-w") == 0)
+            bitset |= BIT_w;
+        else if (strcmp(argv[i], "-rw") == 0)
+            bitset |= BIT_rw;
+        else if (strcmp(argv[i], "-t") == 0)
+            bitset |= BIT_t;
+        else if (strcmp(argv[i], "-s") == 0)
+            bitset |= BIT_s;
+        else if (strcmp(argv[i], "-d") == 0)
+            bitset |= BIT_d;
+        else {
             errno = EINVAL;
-        } else if (status == RW_SHUTDOWN) {
-            fprintf(stderr, "Daemon is shutting down\n");
-            errno = ECANCELED;
-        } else {
-            errno = EPROTO;
+            perror("Option error. AVAILABLE = < [-r | -w | -rw] | -t | -s | -d >\n");
+            return -1;
         }
-        goto fail;
     }
-fail:
-    {
-        int saved = errno;
-        close(fd);
-        errno = saved;
+    if (!!(bitset & BIT_r) + !!(bitset & BIT_w) + !!(bitset & BIT_rw) > 1) {
+        errno = EINVAL;
+        perror("THERE IS MORE THAN 1 READ/WRITE OPTION.\n VALID = ONLY ONE OF < -r | -w | -rw >");
+        return -1;
     }
-    return -1;
+    /* Keep the original process discovery, without trusting a failed read. */
+    FILE *stream = popen("ps -C ssu_ofm", "r");
+    if (stream != NULL) {
+        char buffer[256];
+        if (fgets(buffer, sizeof(buffer), stream) != NULL) {
+            int pid;
+            while (fscanf(stream, "%d", &pid) == 1) {
+                if (pid > 0) {
+                    /* Ignore a defunct daemon left by a previous session. */
+                    char path[64], line[4096];
+                    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+                    FILE *state = fopen(path, "r");
+                    int zombie = 0;
+                    if (state != NULL) {
+                        if (fgets(line, sizeof(line), state) != NULL) {
+                            char *end = strrchr(line, ')');
+                            zombie = end && end[1] == ' ' && end[2] == 'Z';
+                        }
+                        fclose(state);
+                    }
+                    if (!zombie) {
+                        ofm = pid;
+                        break;
+                    }
+                }
+                if (fgets(buffer, sizeof(buffer), stream) == NULL)
+                    break;
+            }
+        }
+        pclose(stream);
+    }
+    return 0;
 }
 
 static int wait_child(pid_t child)
@@ -147,238 +105,288 @@ static int wait_child(pid_t child)
     return WEXITSTATUS(status);
 }
 
-static int edit(const char *path, int token)
+static int run_cat(void)
 {
-    const char *editor = getenv("EDITOR");
-    if (editor == NULL || *editor == '\0')
-        editor = "vim";
     fflush(NULL);
     pid_t child = fork();
     if (child < 0)
         return -1;
     if (child == 0) {
-        /* Keep the lease alive if the wrapper is killed while editing. */
-        if (fcntl(token, F_SETFD, 0) < 0)
-            _exit(126);
-        execlp(editor, editor, path, (char *)NULL);
-        perror("editor");
+        sigprocmask(SIG_SETMASK, &original_mask, NULL);
+        execl("/bin/cat", "cat", filename, (char *)NULL);
+        perror("execl(cat)");
         _exit(127);
     }
     return wait_child(child);
 }
 
-static int compare(const char *before, const char *after)
+static void waiting(void)
 {
-    FILE *left = fopen(before, "rb");
-    FILE *right = fopen(after, "rb");
-    if (left == NULL || right == NULL) {
-        if (left != NULL)
-            fclose(left);
-        if (right != NULL)
-            fclose(right);
-        return -1;
+    printf("Waiting for Token...%s", filename);
+    if (bitset & BIT_t) {
+        time_t seconds = time(NULL);
+        struct tm value;
+        if (localtime_r(&seconds, &value) != NULL)
+            printf("[%d-%02d-%02d %02d:%02d:%02d]", value.tm_year + 1900,
+                   value.tm_mon + 1, value.tm_mday, value.tm_hour, value.tm_min, value.tm_sec);
     }
-    int result = 0;
-    for (;;) {
-        int a = fgetc(left), b = fgetc(right);
-        if (ferror(left) || ferror(right)) {
-            result = -1;
-            break;
-        }
-        if (a != b) {
-            result = 1;
-            break;
-        }
-        if (a == EOF)
-            break;
-    }
-    fclose(left);
-    fclose(right);
-    return result;
+    if ((bitset & BIT_w) || (bitset & BIT_t))
+        printf("\n");
+    fflush(stdout);
 }
 
-static int show_diff(const char *before, const char *after)
+static int receive_signal(long seconds, long nanoseconds)
 {
+    siginfo_t info;
+    struct timespec interval = {.tv_sec = seconds, .tv_nsec = nanoseconds};
+    int signo = sigtimedwait(&signals, &info, &interval);
+    if (signo < 0)
+        return errno == EINTR || errno == EAGAIN ? 0 : -1;
+    if (info.si_pid != ofm)
+        return 0;
+    if (signo == SIGUSR2) {
+        printf("Can't Manage File(%s) : Incorrect ofm filename\n", filename);
+        return -1;
+    }
+    if (signo == SIGUSR1)
+        permission = 1;
+    return 0;
+}
+
+static int request_edit(void)
+{
+    int fd = open(FIFO_FILE, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        printf("error in fifoopen\n");
+        return -1;
+    }
+    struct stat info;
+    if (fstat(fd, &info) < 0 || !S_ISFIFO(info.st_mode)) {
+        close(fd);
+        printf("error in fifoopen\n");
+        return -1;
+    }
+    time_t last_print = 0;
+    for (;;) {
+        if (kill(ofm, 0) < 0) {
+            close(fd);
+            return -1;
+        }
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) {
+            int unread;
+            if (ioctl(fd, FIONREAD, &unread) < 0) {
+                close(fd);
+                return -1;
+            }
+            if (unread == 0)
+                break;
+            flock(fd, LOCK_UN);
+        } else if (errno != EWOULDBLOCK && errno != EINTR) {
+            close(fd);
+            return -1;
+        }
+        time_t now = time(NULL);
+        if (now != last_print) {
+            waiting();
+            last_print = now;
+        }
+        if (receive_signal(0, 10000000) < 0) {
+            close(fd);
+            return -1;
+        }
+    }
+    size_t length = strlen(filename) + ((bitset & BIT_rw) ? 1u : 0u);
+    long atomic_limit = fpathconf(fd, _PC_PIPE_BUF);
+    ssize_t written = -1;
+    if (atomic_limit > 0 && length <= (size_t)atomic_limit && length <= 4096) {
+        do {
+            written = write(fd, filename, length);
+        } while (written < 0 && errno == EINTR);
+    }
+    if (written != (ssize_t)length || kill(ofm, SIGUSR1) < 0) {
+        printf("write error in fifo write\n");
+        close(fd);
+        return -1;
+    }
+    /* Do not let the next writer notify the daemon before it consumes this name. */
+    for (;;) {
+        int unread;
+        if (ioctl(fd, FIONREAD, &unread) < 0) {
+            close(fd);
+            return -1;
+        }
+        if (unread == 0) {
+            close(fd);
+            fd = -1;
+            break;
+        }
+        if (kill(ofm, 0) < 0 || receive_signal(0, 10000000) < 0) {
+            close(fd);
+            return -1;
+        }
+        time_t now = time(NULL);
+        if (!permission && now != last_print) {
+            waiting();
+            last_print = now;
+        }
+    }
+    while (!permission) {
+        if (receive_signal(0, 0) < 0)
+            return -1;
+        if (permission)
+            break;
+        waiting();
+        if (kill(ofm, 0) < 0 || receive_signal(1, 0) < 0)
+            return -1;
+    }
+    return 0;
+}
+
+static int edit_file(void)
+{
+    edit_lock = open("tmp", O_RDONLY | O_DIRECTORY);
+    if (edit_lock < 0 || flock(edit_lock, LOCK_EX) < 0)
+        return -1;
+    int output = mkstemp(tempfile);
+    if (output < 0)
+        return -1;
+    temp_created = 1;
+    fcntl(output, F_SETFD, FD_CLOEXEC);
+    int input = open(filename, O_RDONLY | O_CLOEXEC);
+    if (input < 0) {
+        close(output);
+        return -1;
+    }
+    char buffer[8192];
+    int success = 1;
+    for (;;) {
+        ssize_t count = read(input, buffer, sizeof(buffer));
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count < 0) {
+            success = 0;
+            break;
+        }
+        if (count == 0)
+            break;
+        ssize_t offset = 0;
+        while (offset < count) {
+            ssize_t size = write(output, buffer + offset, (size_t)(count - offset));
+            if (size < 0 && errno == EINTR)
+                continue;
+            if (size <= 0) {
+                success = 0;
+                break;
+            }
+            offset += size;
+        }
+        if (!success)
+            break;
+    }
+    close(input);
+    if (close(output) < 0)
+        success = 0;
+    if (!success)
+        return -1;
     fflush(NULL);
     pid_t child = fork();
     if (child < 0)
         return -1;
     if (child == 0) {
-        execlp("diff", "diff", "-u", "--", before, after, (char *)NULL);
-        perror("diff");
+        /* The inherited directory lock survives wrapper-only termination. */
+        sigprocmask(SIG_SETMASK, &original_mask, NULL);
+        execl("/usr/bin/vim", "vim", filename, (char *)NULL);
+        perror("execl(vim)");
         _exit(127);
     }
-    int status = wait_child(child);
-    return status == 0 || status == 1 ? 0 : -1;
+    return wait_child(child);
 }
 
 int main(int argc, char **argv)
 {
-    enum { NONE, READ, WRITE, READ_WRITE } mode = NONE;
-    int times = 0, sizes = 0, differences = 0;
-    long timeout = 30;
-    const char *socket_option = RW_DEFAULT_SOCKET;
-    if (argc == 2 && strcmp(argv[1], "--help") == 0) {
-        usage(stdout);
-        return 0;
-    }
-    if (argc < 3) {
-        usage(stderr);
-        return 2;
-    }
-    for (int i = 2; i < argc; ++i) {
-        if (strcmp(argv[i], "-r") == 0 || strcmp(argv[i], "-w") == 0 ||
-            strcmp(argv[i], "-rw") == 0) {
-            if (mode != NONE) {
-                usage(stderr);
-                return 2;
-            }
-            mode = strcmp(argv[i], "-r") == 0 ? READ :
-                   strcmp(argv[i], "-w") == 0 ? WRITE : READ_WRITE;
-        } else if (strcmp(argv[i], "-t") == 0) {
-            times = 1;
-        } else if (strcmp(argv[i], "-s") == 0) {
-            sizes = 1;
-        } else if (strcmp(argv[i], "-d") == 0) {
-            differences = 1;
-        } else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
-            socket_option = argv[++i];
-        } else if (strcmp(argv[i], "--timeout") == 0 && i + 1 < argc) {
-            if (rw_number(argv[++i], 1, 86400, &timeout) < 0) {
-                usage(stderr);
-                return 2;
-            }
-        } else {
-            usage(stderr);
-            return 2;
-        }
-    }
-    if (mode == NONE) {
-        usage(stderr);
-        return 2;
-    }
-    char path[RW_PATH_MAX], socket_path[RW_PATH_MAX];
-    struct stat before, after;
-    if (realpath(argv[1], path) == NULL || stat(path, &before) < 0) {
-        perror("target");
+    if (parse(argc, argv) < 0)
+        return 1;
+    sigemptyset(&signals);
+    sigaddset(&signals, SIGUSR1);
+    sigaddset(&signals, SIGUSR2);
+    if (sigprocmask(SIG_BLOCK, &signals, &original_mask) < 0)
+        return 1;
+    struct stat statbuf, statbuf2;
+    if (lstat(filename, &statbuf) < 0) {
+        perror("lstat() error\n");
         return 1;
     }
-    if (!S_ISREG(before.st_mode)) {
-        fprintf(stderr, "Target must be an existing regular file\n");
+    if (!(bitset & BIT_r) && ofm == 0) {
+        printf("where is ssu_ofm?\nssu_vim error\n");
         return 1;
     }
-    if (mode == READ || mode == READ_WRITE) {
-        if (times) {
-            show_time("Last modification time", before.st_mtime);
-            show_time("Current time", time(NULL));
-        }
-        if (show_file(path) < 0) {
-            perror("read file");
+    if (bitset & BIT_t) {
+        struct tm mtime, now;
+        time_t rawTime = time(NULL);
+        if (localtime_r(&statbuf.st_mtime, &mtime) == NULL ||
+            localtime_r(&rawTime, &now) == NULL)
             return 1;
-        }
-        if (mode == READ)
-            return 0;
-        char answer[16];
-        printf("\nWould you like to modify '%s'? (yes/no): ", path);
+        printf("##[Modification Time]##\n");
+        printf("Last Modification time of '%s': [%d-%02d-%02d %02d:%02d:%02d]\n",
+               filename, mtime.tm_year + 1900, mtime.tm_mon + 1, mtime.tm_mday,
+               mtime.tm_hour, mtime.tm_min, mtime.tm_sec);
+        printf("Current time: [%d-%02d-%02d %02d:%02d:%02d]\n",
+               now.tm_year + 1900, now.tm_mon + 1, now.tm_mday,
+               now.tm_hour, now.tm_min, now.tm_sec);
+    }
+    if (bitset & BIT_r)
+        return run_cat() == 0 ? 0 : 1;
+    int should_edit = !!(bitset & BIT_w);
+    if (bitset & BIT_rw) {
+        if (run_cat() != 0)
+            return 1;
+        printf("\nWould you like to modify '%s'? (yes/no) : ", filename);
         fflush(stdout);
-        if (fgets(answer, sizeof(answer), stdin) == NULL) {
-            if (ferror(stdin)) {
-                perror("confirmation");
-                return 1;
-            }
-            return 0;
+        char buffer[256];
+        should_edit = scanf("%255s", buffer) == 1 && strcmp(buffer, "yes") == 0;
+    }
+    int result = 1;
+    if (should_edit && (request_edit() < 0 || edit_file() != 0))
+        goto cleanup;
+    if (lstat(filename, &statbuf2) < 0) {
+        printf("lstat error\n");
+        goto cleanup;
+    }
+    int changed = difftime(statbuf.st_mtime, statbuf2.st_mtime) != 0.0;
+    if (bitset & BIT_t) {
+        printf("##[Modification Time]##\n");
+        printf("%s", changed ? "There was modification.\n" : "There was no modification.\n");
+    }
+    if ((bitset & BIT_s) && changed) {
+        printf("##[File Size]##\n");
+        printf("Before modification : %ld(bytes)\n", (long)statbuf.st_size);
+        printf("After modification : %ld(bytes)\n", (long)statbuf2.st_size);
+    }
+    if ((bitset & BIT_d) && changed && temp_created) {
+        printf("##[Compare with Previous File]##\n");
+        fflush(NULL);
+        pid_t child = fork();
+        if (child < 0) {
+            printf("fork() error");
+            goto cleanup;
         }
-        if (strcmp(answer, "no\n") == 0 || strcmp(answer, "no") == 0)
-            return 0;
-        if (strcmp(answer, "yes\n") != 0 && strcmp(answer, "yes") != 0) {
-            fprintf(stderr, "Please answer yes or no\n");
-            return 2;
+        if (child == 0) {
+            sigprocmask(SIG_SETMASK, &original_mask, NULL);
+            execl("/usr/bin/diff", "diff", tempfile, filename, (char *)NULL);
+            perror("execl(diff)");
+            _exit(127);
         }
-    }
-    if (rw_absolute(socket_option, socket_path, sizeof(socket_path)) < 0) {
-        perror("socket path");
-        return 1;
-    }
-    int token = acquire(socket_path, path, timeout);
-    if (token < 0) {
-        perror("edit permission");
-        return 1;
-    }
-    int result = 1, temp_fd = -1, input = -1, temp_created = 0;
-    char temporary[RW_PATH_MAX];
-    const char *temp_dir = getenv("TMPDIR");
-    if (temp_dir == NULL || *temp_dir == '\0')
-        temp_dir = "/tmp";
-    int length = snprintf(temporary, sizeof(temporary), "%s/readerwriter-XXXXXX", temp_dir);
-    if (length < 0 || (size_t)length >= sizeof(temporary)) {
-        fprintf(stderr, "Temporary path too long\n");
-        goto cleanup;
-    }
-    temp_fd = mkostemp(temporary, O_CLOEXEC);
-    if (temp_fd < 0) {
-        perror("temporary file");
-        goto cleanup;
-    }
-    temp_created = 1;
-    input = open(path, O_RDONLY | O_CLOEXEC);
-    if (input < 0 || fstat(input, &before) < 0 || !S_ISREG(before.st_mode) ||
-        rw_copy(input, temp_fd) < 0) {
-        perror("snapshot");
-        goto cleanup;
-    }
-    close(input);
-    input = -1;
-    if (close(temp_fd) < 0) {
-        temp_fd = -1;
-        perror("snapshot close");
-        goto cleanup;
-    }
-    temp_fd = -1;
-    if (times) {
-        show_time("Before modification", before.st_mtime);
-        show_time("Current time", time(NULL));
-    }
-    int editor_status = edit(path, token);
-    if (editor_status != 0) {
-        fprintf(stderr, "Editor failed (status=%d)\n", editor_status);
-        goto cleanup;
-    }
-    if (stat(path, &after) < 0 || !S_ISREG(after.st_mode)) {
-        fprintf(stderr, "Edited file is missing or is not a regular file\n");
-        goto cleanup;
-    }
-    int changed = compare(temporary, path);
-    if (changed < 0) {
-        perror("compare contents");
-        goto cleanup;
-    }
-    if (times) {
-        show_time("After modification", after.st_mtime);
-        puts(changed ? "There was modification." : "There was no modification.");
-    }
-    if (sizes && changed)
-        printf("Before modification: %lld bytes\nAfter modification: %lld bytes\n",
-               (long long)before.st_size, (long long)after.st_size);
-    if (differences && changed && show_diff(temporary, path) < 0) {
-        fprintf(stderr, "diff failed\n");
-        goto cleanup;
+        int status = wait_child(child);
+        if (status != 0 && status != 1)
+            goto cleanup;
     }
     result = 0;
-
 cleanup:
-    if (input >= 0)
-        close(input);
-    if (temp_fd >= 0)
-        close(temp_fd);
-    if (temp_created && unlink(temporary) < 0) {
-        perror("temporary file cleanup");
+    if (temp_created && unlink(tempfile) < 0)
         result = 1;
-    }
-    /* Keep permission through stat/diff so the next editor cannot race them. */
-    if (rw_send_status(token, RW_DONE) < 0) {
-        fprintf(stderr, "Daemon disconnected before edit completion\n");
+    if (edit_lock >= 0)
+        close(edit_lock);
+    if (permission && kill(ofm, SIGUSR2) < 0)
         result = 1;
-    }
-    close(token);
     return result;
 }
