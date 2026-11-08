@@ -129,8 +129,12 @@ class OriginalContractTests(unittest.TestCase):
     def release(self, label):
         (self.root / ("gate-" + label)).touch()
 
-    def finish(self, client):
-        stdout, stderr = client.communicate(timeout=12)
+    def finish(self, client, timeout=12):
+        try:
+            stdout, stderr = client.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.fail(f"Client {client.pid} did not finish in {timeout}s. "
+                      f"Target: {self.target.read_text()!r}; log: {self.log.read_text()!r}")
         self.assertEqual(client.returncode, 0, stdout + stderr)
         return stdout
 
@@ -392,7 +396,9 @@ static int scheduled_flock(int fd, int operation)
         self.start_server()
         clients = [self.spawn_client(str(i)) for i in range(6)]
         for client in clients:
-            self.finish(client)
+            # The first spawned client can be last in the queue. Allow time
+            # for all six real Vim sessions, not just one session.
+            self.finish(client, timeout=12 * len(clients))
         lines = self.target.read_text().splitlines()
         self.assertEqual(len(lines), 7)
         self.assertEqual(set(lines), {"original", *(str(i) for i in range(6))})
