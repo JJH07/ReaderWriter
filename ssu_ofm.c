@@ -160,6 +160,7 @@ static void completed(pid_t pid)
     if (bitset & BIT_t)
         timestamp();
     printf("Finished Process ID : %d\n", pid);
+    fflush(stdout);
     if (bitset & BIT_l)
         copy_log();
     owner = 0;
@@ -229,6 +230,7 @@ static void serve(const sigset_t *signals)
                                 printf("User : %s, UID : %d, GID : %d\n", data->pw_name,
                                        data->pw_uid, data->pw_gid);
                         }
+                        fflush(stdout);
                         if (owner == 0) {
                             if (kill(pending.si_pid, SIGUSR1) == 0)
                                 owner = pending.si_pid;
@@ -322,6 +324,7 @@ static int ssu_daemon_init(void)
         timestamp();
     printf("<<Daemon Process Initialized with pid : %d>>\n", getpid());
     printf("Initialized with Default Value : %d\n", queuesize);
+    fflush(stdout);
     if (write(ready[1], "1", 1) != 1)
         _exit(1);
     close(ready[1]);

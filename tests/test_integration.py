@@ -101,7 +101,9 @@ class OriginalContractTests(unittest.TestCase):
         if "-p" in options:
             directory /= options[options.index("-p") + 1]
         self.log = directory / "ssu_log.txt"
-        self.wait_for(lambda: self.log.exists() and "Initialized with Default" in self.log.read_text())
+        self.assertTrue(self.log.exists(), "Daemon did not create its log")
+        self.assertIn("Initialized with Default", self.log.read_text(),
+                      "Daemon returned ready before flushing startup log")
         self.daemon = int(re.search(r"pid : (\d+)>>", self.log.read_text())[1])
 
     def run_client(self, *options, input=None, target="sample.txt", env=None):
