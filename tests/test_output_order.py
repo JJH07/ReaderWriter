@@ -12,7 +12,6 @@ import unittest
 import test_integration as integration
 
 ORIGINAL = "a2dbeb73c1d2b5e7a58cf536b27dd4c40497d3e0"
-MARKER = "READERWRITER_TEST_EDITOR_OUTPUT"
 
 
 class OutputOrderTests(unittest.TestCase):
@@ -136,29 +135,27 @@ class OutputOrderTests(unittest.TestCase):
         lookup.write_text(f"#!/bin/sh\nprintf 'PID TTY TIME CMD\\n{self.daemon} ? 00:00:00 ssu_ofm\\n'\n")
         lookup.chmod(0o755)
         environment = dict(self.env, PATH=str(bindir) + os.pathsep + self.env["PATH"])
-        rc = self.root / "test.vim"
-        rc.write_text(integration.VIMRC.replace("function! TestEdit()",
-                      "function! TestEdit()\n  call writefile(['" + MARKER + "'], '/dev/stdout', 'a')"))
-        labels = {"editor": MARKER, "diff": "1a2\n> edited\n",
+        # Vim's own file message uses the inherited stdout descriptor. Opening
+        # /dev/stdout separately would distort offsets when stdout is a file.
+        labels = {"editor": '"sample.txt"', "diff": "1a2\n> edited\n",
                   "time": "Last Modification time of 'sample.txt':",
                   "changed": "There was modification.\n", "size": "##[File Size]##\n",
                   "compare": "##[Compare with Previous File]##\n"}
-        completed = 0
         for mode in ("-w", "-rw"):
             for destination in ("pipe", "file"):
                 with self.subTest(mode=mode, destination=destination):
                     orders = []
                     for binary in (self.original_client(), integration.CLIENT):
+                        completed = self.log.read_text().count("Finished Process ID")
                         self.target.write_text("original\n")
                         os.utime(self.target, (946684800, 946684800))
                         output = self.captured(binary, [mode, "-t", "-s", "-d"],
                                                destination, "yes\n", environment)
+                        self.wait_for(lambda: self.log.read_text().count("Finished Process ID") == completed + 1)
                         self.assertEqual(self.target.read_text(), "original\nedited\n")
                         for label in labels.values():
                             self.assertIn(label, output)
                         orders.append(sorted(labels, key=lambda key: output.index(labels[key])))
-                        completed += 1
-                        self.wait_for(lambda: self.log.read_text().count("Finished Process ID") == completed)
                     self.assertEqual(orders[0], ["editor", "diff", "time", "changed", "size", "compare"])
                     self.assertEqual(orders[1], orders[0])
 
