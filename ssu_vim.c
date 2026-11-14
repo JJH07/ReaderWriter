@@ -79,7 +79,9 @@ static int parse(int argc, char **argv)
                         }
                         fclose(state);
                     }
-                    if (!zombie) {
+                    /* A process can disappear after ps captured its PID.
+                     * Permission errors alone do not mean it has exited. */
+                    if (!zombie && (kill(pid, 0) == 0 || errno != ESRCH)) {
                         ofm = pid;
                         break;
                     }
