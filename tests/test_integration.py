@@ -233,6 +233,38 @@ class OriginalContractTests(unittest.TestCase):
         self.assertEqual(self.target.read_text(), "original\nedited\n")
         self.wait_for(lambda: "Finished Process ID" in self.log.read_text())
 
+    def test_initial_log_write_failure_does_not_report_ready(self):
+        log = self.root / "ssu_log.txt"
+        # /dev/full opens successfully but rejects writes with ENOSPC.
+        log.symlink_to("/dev/full")
+        result = subprocess.run([SERVER, "sample.txt"], cwd=self.root,
+                                env=self.env, capture_output=True, text=True, timeout=8)
+        # The unfixed daemon remains alive without a readable startup log.
+        # Find only this test's daemon so tearDown can clean it on failure.
+        for entry in Path("/proc").iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                if (entry / "comm").read_text().strip() == "ssu_ofm" and \
+                        os.readlink(entry / "cwd") == str(self.root):
+                    self.daemon = int(entry.name)
+                    break
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "Daemon Process Initialization\n")
+        self.assertEqual(result.stderr, "ssu_daemon_init failed\n")
+        if self.daemon is not None:
+            self.wait_for(lambda: not self.process_alive(self.daemon))
+        self.assertEqual(self.target.read_text(), "original\n")
+        # A failed launch must release the FIFO lock for a healthy retry.
+        log.unlink()
+        self.start_server()
+        edited = self.run_client("-w")
+        self.assertEqual(edited.returncode, 0, edited.stdout + edited.stderr)
+        self.assertEqual(self.target.read_text(), "original\nedited\n")
+        self.wait_for(lambda: "Finished Process ID" in self.log.read_text())
+
     def test_n_no_artificial_1024_limit(self):
         self.start_server("-n", "1025")
         self.assertIn("Initialized with Default Value : 1025\n", self.log.read_text())
