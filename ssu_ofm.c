@@ -191,6 +191,23 @@ static int setup_fifo(void)
     return edit_lock < 0 ? -1 : 0;
 }
 
+static ssize_t peek_request(char *buffer, size_t size)
+{
+    /* Inspect a full-queue request without consuming its FIFO bytes. The
+     * sender keeps its existing writer lock until we actually consume them. */
+    int preview[2];
+    if (pipe2(preview, O_NONBLOCK | O_CLOEXEC) < 0)
+        return -1;
+    ssize_t count = tee(fifofd, preview[1], size, SPLICE_F_NONBLOCK);
+    if (count > 0)
+        count = read(preview[0], buffer, (size_t)count);
+    int saved_errno = errno;
+    close(preview[0]);
+    close(preview[1]);
+    errno = saved_errno;
+    return count;
+}
+
 static void serve(const sigset_t *signals)
 {
     siginfo_t pending = {0};
@@ -219,7 +236,19 @@ static void serve(const sigset_t *signals)
             while (read(fifofd, stale, sizeof(stale)) > 0) {}
             flock(fifofd, LOCK_UN);
         }
-        if (have_pending && (!alive(pending.si_pid) || owner == 0 || q_cnt < queuesize)) {
+        int consume_request = have_pending &&
+            (!alive(pending.si_pid) || owner == 0 || q_cnt < queuesize);
+        if (have_pending && !consume_request) {
+            /* An invalid filename needs no queue slot: reject it even while
+             * the queue is full, retaining backpressure for valid requests. */
+            char preview[4097];
+            ssize_t count = peek_request(preview, sizeof(preview) - 1);
+            if (count > 0) {
+                preview[count] = '\0';
+                consume_request = strcmp(preview, filename) != 0;
+            }
+        }
+        if (consume_request) {
             /* Writers serialize write+signal until these bytes are consumed. */
             char buffer[4097];
             ssize_t count = read(fifofd, buffer, sizeof(buffer) - 1);
