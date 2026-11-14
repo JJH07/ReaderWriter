@@ -107,7 +107,8 @@ static int wait_child(pid_t child)
 
 static int run_cat(void)
 {
-    fflush(NULL);
+    /* Keep the original stdio buffering: redirected child output can precede
+     * the parent's buffered report. exec/_exit do not flush the child's copy. */
     pid_t child = fork();
     if (child < 0)
         return -1;
@@ -132,7 +133,6 @@ static void waiting(void)
     }
     if ((bitset & BIT_w) || (bitset & BIT_t))
         printf("\n");
-    fflush(stdout);
 }
 
 static int receive_signal(long seconds, long nanoseconds)
@@ -288,7 +288,6 @@ static int edit_file(void)
         success = 0;
     if (!success)
         return -1;
-    fflush(NULL);
     pid_t child = fork();
     if (child < 0)
         return -1;
@@ -341,7 +340,6 @@ int main(int argc, char **argv)
         if (run_cat() != 0)
             return 1;
         printf("\nWould you like to modify '%s'? (yes/no) : ", filename);
-        fflush(stdout);
         char buffer[256];
         should_edit = scanf("%255s", buffer) == 1 && strcmp(buffer, "yes") == 0;
     }
@@ -364,7 +362,6 @@ int main(int argc, char **argv)
     }
     if ((bitset & BIT_d) && changed && temp_created) {
         printf("##[Compare with Previous File]##\n");
-        fflush(NULL);
         pid_t child = fork();
         if (child < 0) {
             printf("fork() error");
