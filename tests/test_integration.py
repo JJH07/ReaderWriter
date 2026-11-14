@@ -233,6 +233,20 @@ class OriginalContractTests(unittest.TestCase):
         self.assertEqual(self.target.read_text(), "original\nedited\n")
         self.wait_for(lambda: "Finished Process ID" in self.log.read_text())
 
+    def test_daemon_starts_with_stdout_closed(self):
+        result = subprocess.run([SERVER, "sample.txt"], cwd=self.root,
+                                env=self.env, capture_output=True, text=True, timeout=8,
+                                preexec_fn=lambda: os.close(1))
+        self.log = self.root / "ssu_log.txt"
+        self.wait_for(lambda: self.log.exists() and "Initialized with Default" in self.log.read_text())
+        self.daemon = int(re.search(r"pid : (\d+)>>", self.log.read_text())[1])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(result.stderr, "")
+        edited = self.run_client("-w")
+        self.assertEqual(edited.returncode, 0, edited.stdout + edited.stderr)
+        self.assertEqual(self.target.read_text(), "original\nedited\n")
+
     def test_initial_log_write_failure_does_not_report_ready(self):
         log = self.root / "ssu_log.txt"
         # /dev/full opens successfully but rejects writes with ENOSPC.
