@@ -26,8 +26,12 @@ python3 -m unittest discover -s tests -v
 - `-t -id -l -p` 조합의 로그 문구·사용자 정보·복사본 이름
 - 누락·충돌 인자의 안전한 실패, 원본에 없는 옵션 거부
 - FIFO 자리에 있던 일반 파일 보존
+- 원본 클라이언트와 파일·파이프 출력 비교: `-r -t`, `-rw -t` 취소, `-w/-rw -t -s -d` 실제 편집의 출력 순서
+- 가상 터미널에서 원본과 읽기 출력 비교 및 답을 입력하기 전 수정 확인 문구 표시 검사
 
 ## CI
+
+2026-11-14 후속 리뷰 3번 수정: 커밋 `aecff7bf5fa82b2421f52ed6af19dc0ff4256075`에서 28개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43586224057). 기존 24개 검사 중 출력 순서 기대값 두 곳을 원본에 맞추고, 원본 클라이언트와 비교하는 네 검사를 추가했습니다. 같은 테스트의 [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43586242958)은 세 구성 모두 출력 순서 관련 10개 단언에서 실패하여 회귀 검출도 확인했습니다.
 
 2026-11-14 후속 리뷰 2번 수정: 커밋 `409f83375ed461538e8a490d4545616a177ec2b5`에서 24개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43533025588). 기존 22개 검사와 두 큐 용량에 대한 새 검사이며, 각 새 검사 안에서 `-w`·`-rw`와 두 파일명 경우를 모두 확인합니다. 3번 리뷰 항목인 리다이렉션 출력 순서는 이번 수정 범위에서 제외합니다.
 
@@ -37,4 +41,6 @@ python3 -m unittest discover -s tests -v
 
 [Linux build and integration tests](https://github.com/JJH07/ReaderWriter/actions/workflows/ci.yml)는 GCC, Clang, GCC + AddressSanitizer/UndefinedBehaviorSanitizer 세 구성에서 같은 테스트를 실행합니다. `-Wall -Wextra -Wpedantic -Werror`로 컴파일합니다.
 
-Windows 로컬 환경의 정적 확인과 Linux CI의 실제 실행 결과를 구분합니다. Sanitizer 통과는 실행한 경로에 대한 검사이며 모든 스케줄링·파일시스템·강제 종료 상황에 대한 증명은 아닙니다. 원본 바이너리와의 전 입력 자동 대조 검사는 포함하지 않습니다. 기대 출력은 원본 코드의 문구와 기능을 기준으로 작성했습니다.
+Windows 로컬 환경의 정적 확인과 Linux CI의 실제 실행 결과를 구분합니다. Sanitizer 통과는 실행한 경로에 대한 검사이며 모든 스케줄링·파일시스템·강제 종료 상황에 대한 증명은 아닙니다. 원본 바이너리와의 전 입력 자동 대조 검사는 포함하지 않습니다.
+
+`test_output_order.py`는 Git 이력의 원본 `ssu_vim.c`를 수정 없이 별도 임시 디렉터리에서 GCC로 빌드합니다. CI는 이를 위해 원본 커밋을 포함한 이력을 가져옵니다. 출력 순서 비교에서 날짜·시각 문자열은 치환하며, 원본의 시각 계산 버그는 재도입하지 않습니다. 현재 코드의 실제 수정 시각 값은 별도 통합 테스트로 검사합니다. 편집 테스트는 같은 실제 데몬·Vim을 사용하되 원본이 이전 테스트의 좀비 PID를 선택하지 않도록 테스트 환경의 `ps` 결과를 해당 데몬 하나로 고정합니다. 편집기의 화면 제어 문자열과 대기 횟수는 전체 바이트 비교 대상이 아니며, 출력 표제와 결과의 상대 순서를 검사합니다. 원본의 알려진 메모리·시그널 문제 때문에 원본 바이너리는 sanitizer 대상에서 제외하고 현재 제품 코드를 검사합니다.

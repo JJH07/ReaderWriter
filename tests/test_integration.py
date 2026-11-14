@@ -158,7 +158,7 @@ class OriginalContractTests(unittest.TestCase):
     def test_time_labels_and_values(self):
         result = self.run_client("-r", "-t")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertRegex(result.stdout, r"^##\[Modification Time\]##\nLast Modification time of 'sample.txt': \[2000-01-01 00:00:00\]\nCurrent time: \[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\]\noriginal\n$")
+        self.assertRegex(result.stdout, r"^original\n##\[Modification Time\]##\nLast Modification time of 'sample.txt': \[2000-01-01 00:00:00\]\nCurrent time: \[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\]\n$")
 
     def test_no_daemon_behavior_includes_rw_no(self):
         for mode in ("-w", "-rw"):
@@ -217,7 +217,9 @@ class OriginalContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("There was modification.\n", result.stdout)
         self.assertIn("##[File Size]##\nBefore modification : 9(bytes)\nAfter modification : 16(bytes)\n", result.stdout)
-        self.assertIn("##[Compare with Previous File]##\n1a2\n> edited\n", result.stdout)
+        self.assertIn("1a2\n> edited\n", result.stdout)
+        self.assertLess(result.stdout.index("1a2\n> edited\n"),
+                        result.stdout.index("##[Compare with Previous File]##\n"))
         self.assertNotIn("@@", result.stdout)
         self.assertEqual(self.target.read_text(), "original\nedited\n")
         self.assertFalse(list(self.root.glob("temp??????")))

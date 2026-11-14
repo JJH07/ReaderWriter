@@ -58,6 +58,8 @@ ssu_vim FILE <-r|-w|-rw> [-t] [-s] [-d]
 
 원래의 주요 출력 문구를 유지합니다.
 
+출력 버퍼링도 원본 방식으로 유지합니다. 터미널에서는 시간 정보가 먼저 보이지만, `./ssu_vim sample.txt -r -t > out.txt`처럼 리다이렉션하면 파일 내용 뒤에 시간 정보가 기록됩니다. 편집 결과를 리다이렉션할 때는 자식 프로세스인 Vim·diff의 출력이 부모의 보고 문구보다 먼저 기록될 수 있습니다. 출력 문구를 재정렬하는 별도 옵션은 없습니다.
+
 ```text
 Daemon Process Initialization
 Would you like to modify 'sample.txt'? (yes/no) :
