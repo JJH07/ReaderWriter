@@ -30,8 +30,11 @@ python3 -m unittest discover -s tests -v
 - 가상 터미널에서 원본과 읽기 출력 비교 및 답을 입력하기 전 수정 확인 문구 표시 검사
 - 표준 입력·오류가 닫힌 환경에서 데몬의 정상 시작, 원래 초기화 문구 및 후속 실제 편집·완료 로그 확인
 - 허용 한계인 497바이트 로그 디렉터리에서 `-l -p` 편집 완료 후 원래 날짜 이름의 복사본 생성 및 로그 내용 일치 확인
+- 프로세스 목록의 첫 PID가 이미 사라진 경우 뒤의 실제 데몬을 선택하여 Vim 편집과 요청·완료 로그가 정상 작동하는지 확인
 
 ## CI
+
+2026-11-14 후속 리뷰 6번 수정: 커밋 `98d28a2f93f1c6030f66f489203208314b0e246b`에서 기존 30개와 사라진 PID 탐색 검사 1개를 합한 31개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43588382722). [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43588346272)에서는 세 구성 모두 새 검사만 편집 실패로 끝났습니다.
 
 2026-11-14 후속 리뷰 5번 수정: 커밋 `fceeafeabbfd66b071e5b81488241a6765ea9357`에서 기존 29개와 긴 로그 디렉터리 검사 1개를 합한 30개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43587452295). [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43587412447)에서는 세 구성 모두 새 복사본 생성 검사만 시간 초과했습니다.
 

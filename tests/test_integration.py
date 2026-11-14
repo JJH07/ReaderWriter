@@ -166,6 +166,30 @@ class OriginalContractTests(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertEqual(result.stdout, "where is ssu_ofm?\nssu_vim error\n")
 
+    def test_disappeared_pid_does_not_hide_live_daemon(self):
+        self.start_server()
+        departed = subprocess.Popen(["/bin/true"])
+        departed.wait(timeout=3)
+        with self.assertRaises(ProcessLookupError):
+            os.kill(departed.pid, 0)
+        # Model a process exiting after ps took its snapshot. Keep the real
+        # daemon and Vim; only make the stale process-list ordering repeatable.
+        bindir = self.root / "lookup"
+        bindir.mkdir()
+        lookup = bindir / "ps"
+        lookup.write_text("#!/bin/sh\nprintf 'PID TTY TIME CMD\\n"
+                          f"{departed.pid} ? 00:00:00 ssu_ofm\\n"
+                          f"{self.daemon} ? 00:00:00 ssu_ofm\\n'\n")
+        lookup.chmod(0o755)
+        environment = dict(self.env, PATH=str(bindir) + os.pathsep + self.env["PATH"])
+        result = self.run_client("-w", env=environment)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_text(), "original\nedited\n")
+        self.wait_for(lambda: "Finished Process ID" in self.log.read_text())
+        self.assertEqual(self.log.read_text().count("Requested Process ID"), 1)
+        self.assertNotIn("where is ssu_ofm?", result.stdout)
+        self.assertNotIn("write error in fifo write", result.stdout)
+
     def test_new_options_are_removed(self):
         for options in (("-r", "--timeout", "1"), ("-r", "--socket", "x"), ("--help",)):
             result = self.run_client(*options)
