@@ -188,6 +188,27 @@ class OriginalContractTests(unittest.TestCase):
         self.assertIn("Initialized with Default Value : 16\n", self.log.read_text())
         self.assertFalse(list((self.root / "tmp").glob("*.sock*")))
 
+    def test_daemon_starts_with_stdin_and_stderr_closed(self):
+        def close_unused_streams():
+            os.close(0)
+            os.close(2)
+
+        result = subprocess.run([SERVER, "sample.txt"], cwd=self.root,
+                                env=self.env, stdout=subprocess.PIPE,
+                                text=True, timeout=8, preexec_fn=close_unused_streams)
+        # Record the daemon before asserting the launch status: the regression
+        # leaves a live daemon even though its launcher reports failure.
+        self.log = self.root / "ssu_log.txt"
+        self.wait_for(lambda: self.log.exists() and "Initialized with Default" in self.log.read_text())
+        self.daemon = int(re.search(r"pid : (\d+)>>", self.log.read_text())[1])
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(result.stdout, "Daemon Process Initialization\n")
+        self.assertTrue(self.process_alive(self.daemon))
+        edited = self.run_client("-w")
+        self.assertEqual(edited.returncode, 0, edited.stdout + edited.stderr)
+        self.assertEqual(self.target.read_text(), "original\nedited\n")
+        self.wait_for(lambda: "Finished Process ID" in self.log.read_text())
+
     def test_n_no_artificial_1024_limit(self):
         self.start_server("-n", "1025")
         self.assertIn("Initialized with Default Value : 1025\n", self.log.read_text())

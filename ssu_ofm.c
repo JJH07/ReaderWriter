@@ -315,6 +315,19 @@ static int ssu_daemon_init(void)
         free(queue);
         return -1;
     }
+    /* Standard streams may be closed on entry. Keep the child's readiness
+     * writer outside 0..2 before redirecting those descriptors to /dev/null. */
+    if (ready[1] <= STDERR_FILENO) {
+        int fd = fcntl(ready[1], F_DUPFD_CLOEXEC, STDERR_FILENO + 1);
+        if (fd < 0) {
+            close(ready[0]);
+            close(ready[1]);
+            free(queue);
+            return -1;
+        }
+        close(ready[1]);
+        ready[1] = fd;
+    }
     fflush(NULL);
     pid_t child = fork();
     if (child < 0) {

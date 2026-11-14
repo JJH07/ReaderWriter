@@ -28,8 +28,11 @@ python3 -m unittest discover -s tests -v
 - FIFO 자리에 있던 일반 파일 보존
 - 원본 클라이언트와 파일·파이프 출력 비교: `-r -t`, `-rw -t` 취소, `-w/-rw -t -s -d` 실제 편집의 출력 순서
 - 가상 터미널에서 원본과 읽기 출력 비교 및 답을 입력하기 전 수정 확인 문구 표시 검사
+- 표준 입력·오류가 닫힌 환경에서 데몬의 정상 시작, 원래 초기화 문구 및 후속 실제 편집·완료 로그 확인
 
 ## CI
+
+2026-11-14 후속 리뷰 4번 수정: 커밋 `2a62b61a32d76d7d9f92910fbc478778dbbb3df5`에서 기존 28개와 닫힌 표준 스트림 시작 검사 1개를 합한 29개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43586822364). [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43586790476)에서는 세 구성 모두 새 검사만 실패했습니다.
 
 2026-11-14 후속 리뷰 3번 수정: 커밋 `aecff7bf5fa82b2421f52ed6af19dc0ff4256075`에서 28개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43586224057). 기존 24개 검사 중 출력 순서 기대값 두 곳을 원본에 맞추고, 원본 클라이언트와 비교하는 네 검사를 추가했습니다. 같은 테스트의 [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43586242958)은 세 구성 모두 출력 순서 관련 10개 단언에서 실패하여 회귀 검출도 확인했습니다.
 
