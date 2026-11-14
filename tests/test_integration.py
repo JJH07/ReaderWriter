@@ -275,6 +275,22 @@ class OriginalContractTests(unittest.TestCase):
         self.assertRegex(backups[0].name, r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\]$")
         self.assertIn("Finished Process ID", backups[0].read_text())
 
+    def test_backup_in_longest_accepted_log_directory(self):
+        # 497 directory bytes + './' + '/ssu_log.txt' + NUL fill 512 bytes.
+        # The timestamp basename is ten bytes longer than 'ssu_log.txt'.
+        directory = "/".join(("a" * 200, "b" * 200, "c" * 95))
+        (self.root / directory).mkdir(parents=True)
+        self.start_server("-l", "-p", directory)
+        result = self.run_client("-w")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(self.target.read_text(), "original\nedited\n")
+        self.wait_for(lambda: "Finished Process ID" in self.log.read_text())
+        self.wait_for(lambda: len(list(self.log.parent.iterdir())) > 1)
+        backups = [path for path in self.log.parent.iterdir() if path.name != "ssu_log.txt"]
+        self.assertEqual(len(backups), 1)
+        self.assertRegex(backups[0].name, r"^\[\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\]$")
+        self.wait_for(lambda: backups[0].read_bytes() == self.log.read_bytes())
+
     def test_wrong_filename_uses_original_rejection_message(self):
         self.start_server()
         (self.root / "other").write_text("other\n")
