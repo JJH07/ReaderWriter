@@ -277,6 +277,57 @@ class OriginalContractTests(unittest.TestCase):
         self.finish(third)
         self.assertEqual(self.target.read_text(), "original\nfirst\nsecond\nthird\n")
 
+    def check_full_queue_rejects_wrong_filename(self, capacity):
+        self.start_server("-n", str(capacity))
+        first = self.spawn_client("first", True)
+        self.wait_for(lambda: self.started("first"))
+        second = None
+        if capacity:
+            second = self.spawn_client("second", True)
+            self.wait_for(lambda: self.log.read_text().count("Requested Process") == 2)
+        (self.root / "other").write_text("other\n")
+        for mode in ("-w", "-rw"):
+            # Both a different file and another spelling of the same file
+            # must keep the original raw-filename rejection behavior.
+            for target, content in (("other", "other\n"), ("./sample.txt", "original\n")):
+                with self.subTest(capacity=capacity, mode=mode, target=target):
+                    result = self.run_client(mode, input="yes\n", target=target)
+                    self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                    prefix = ""
+                    if mode == "-rw":
+                        prefix = content + f"\nWould you like to modify '{target}'? (yes/no) : "
+                    self.assertTrue(result.stdout.startswith(prefix))
+                    waiting = "Waiting for Token..." + target + ("\n" if mode == "-w" else "")
+                    rejected = f"Can't Manage File({target}) : Incorrect ofm filename\n"
+                    self.assertRegex(result.stdout[len(prefix):],
+                                     "^(?:" + re.escape(waiting) + ")*" + re.escape(rejected) + "$" )
+                    self.assertEqual(result.stderr, "")
+                    self.assertIsNone(first.poll(), "Rejection must not wait for the editor to finish")
+                    self.assertFalse(self.started("second"))
+                    self.assertNotIn("Finished Process ID", self.log.read_text())
+                    self.assertEqual(self.log.read_text().count("Requested Process"), 1 + capacity)
+                    self.assertEqual(self.target.read_text(), "original\n")
+                    self.assertEqual((self.root / "other").read_text(), "other\n")
+        third = self.spawn_client("third")
+        time.sleep(0.2)
+        self.assertFalse(self.started("third"))
+        self.release("first")
+        self.finish(first)
+        if second:
+            self.wait_for(lambda: self.started("second"))
+            self.assertFalse(self.started("third"))
+            self.release("second")
+            self.finish(second)
+        self.finish(third)
+        expected = "original\nfirst\n" + ("second\n" if capacity else "") + "third\n"
+        self.assertEqual(self.target.read_text(), expected)
+
+    def test_full_queue_rejects_wrong_filename_before_editor_finishes(self):
+        self.check_full_queue_rejects_wrong_filename(1)
+
+    def test_zero_queue_rejects_wrong_filename_before_editor_finishes(self):
+        self.check_full_queue_rejects_wrong_filename(0)
+
     def test_zero_wait_queue_still_allows_sequential_edits(self):
         self.start_server("-n", "0")
         first = self.spawn_client("first", True)
