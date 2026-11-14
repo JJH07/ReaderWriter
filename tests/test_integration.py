@@ -67,6 +67,7 @@ class OriginalContractTests(unittest.TestCase):
             diagnostics.append(stderr)
         if self.daemon:
             try:
+                os.kill(self.daemon, signal.SIGCONT)
                 os.kill(self.daemon, signal.SIGTERM)
             except ProcessLookupError:
                 pass
@@ -92,8 +93,8 @@ class OriginalContractTests(unittest.TestCase):
             time.sleep(0.02)
         self.fail("Timed out waiting for test condition")
 
-    def start_server(self, *options):
-        result = subprocess.run([SERVER, "sample.txt", *options], cwd=self.root,
+    def start_server(self, *options, executable=SERVER):
+        result = subprocess.run([executable, "sample.txt", *options], cwd=self.root,
                                 env=self.env, text=True, capture_output=True, timeout=8)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "Daemon Process Initialization\n")
@@ -128,8 +129,12 @@ class OriginalContractTests(unittest.TestCase):
     def release(self, label):
         (self.root / ("gate-" + label)).touch()
 
-    def finish(self, client):
-        stdout, stderr = client.communicate(timeout=12)
+    def finish(self, client, timeout=12):
+        try:
+            stdout, stderr = client.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.fail(f"Client {client.pid} did not finish in {timeout}s. "
+                      f"Target: {self.target.read_text()!r}; log: {self.log.read_text()!r}")
         self.assertEqual(client.returncode, 0, stdout + stderr)
         return stdout
 
@@ -297,11 +302,103 @@ class OriginalContractTests(unittest.TestCase):
         self.finish(successor)
         self.assertFalse(self.started("departed"))
 
+    def test_dead_sender_notice_cannot_consume_successor_request(self):
+        # Compile the actual daemon with two scheduling stops around its first
+        # orphan-data cleanup. No product flags, protocol changes or sleeps
+        # deciding which request wins are needed to force this interleaving.
+        import array
+        import fcntl
+        import termios
+
+        build = self.root / "schedule-test"
+        build.mkdir()
+        source = build / "schedule.c"
+        executable = build / "ssu_ofm"
+        source.write_text(r'''
+#define _GNU_SOURCE
+#include <sys/file.h>
+#include <signal.h>
+#include <unistd.h>
+static int scheduled_flock(int fd, int operation);
+#define flock(fd, operation) scheduled_flock((fd), (operation))
+#include "ssu_ofm.c"
+#undef flock
+static int scheduled_flock(int fd, int operation)
+{
+    static int stage;
+    if (fd == fifofd && operation == (LOCK_EX | LOCK_NB) && stage == 0) {
+        stage = 1;
+        raise(SIGSTOP);
+    }
+    int result = flock(fd, operation);
+    if (fd == fifofd && operation == LOCK_UN && stage == 1 && result == 0) {
+        stage = 2;
+        raise(SIGSTOP);
+    }
+    return result;
+}
+''')
+        command = [os.environ.get("TEST_CC", "gcc"), "-std=c11", "-Wall",
+                   "-Wextra", "-Wpedantic", "-Werror", "-O1", "-g"]
+        if os.environ.get("TEST_SANITIZE") == "true":
+            command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+                        "-fno-pie", "-no-pie"]
+        command += ["-I", str(ROOT), str(source), "-o", str(executable)]
+        built = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        self.start_server(executable=str(executable))
+
+        def stopped():
+            value = Path(f"/proc/{self.daemon}/stat").read_text()
+            return value.rsplit(")", 1)[1].split()[0] == "T"
+
+        def request_pending():
+            status = Path(f"/proc/{self.daemon}/status").read_text()
+            masks = re.findall(r"^(?:SigPnd|ShdPnd):\s*([0-9a-f]+)$", status, re.M)
+            return any(int(mask, 16) & (1 << (signal.SIGUSR1 - 1)) for mask in masks)
+
+        self.wait_for(stopped)
+        departed = self.spawn_client("departed")
+        self.wait_for(request_pending)
+        departed.kill()
+        departed.wait(timeout=3)
+        os.kill(self.daemon, signal.SIGCONT)
+
+        # The second stop is after cleanup released its FIFO lock. Observe
+        # empty FIFO as well as stopped state to distinguish the first stop.
+        fd = os.open(self.root / "tmp" / "fifo", os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            def drained_and_stopped():
+                unread = array.array("i", [0])
+                fcntl.ioctl(fd, termios.FIONREAD, unread, True)
+                return unread[0] == 0 and stopped()
+            self.wait_for(drained_and_stopped)
+            successor = self.spawn_client("successor")
+
+            def successor_written():
+                unread = array.array("i", [0])
+                fcntl.ioctl(fd, termios.FIONREAD, unread, True)
+                return unread[0] > 0 and request_pending()
+            self.wait_for(successor_written)
+            os.kill(self.daemon, signal.SIGCONT)
+            self.finish(successor)
+        finally:
+            os.close(fd)
+        self.assertEqual(self.target.read_text(), "original\nsuccessor\n")
+        self.assertFalse(self.started("departed"))
+        self.wait_for(lambda: "Finished Process ID" in self.log.read_text())
+        records = self.log.read_text()
+        self.assertEqual(records.count("Requested Process ID"), 1)
+        self.assertIn(f"Requested Process ID : {successor.pid}, Requested Filename : sample.txt\n", records)
+        self.assertIn(f"Finished Process ID : {successor.pid}\n", records)
+
     def test_request_burst_keeps_filename_and_pid_paired(self):
         self.start_server()
         clients = [self.spawn_client(str(i)) for i in range(6)]
         for client in clients:
-            self.finish(client)
+            # The first spawned client can be last in the queue. Allow time
+            # for all six real Vim sessions, not just one session.
+            self.finish(client, timeout=12 * len(clients))
         lines = self.target.read_text().splitlines()
         self.assertEqual(len(lines), 7)
         self.assertEqual(set(lines), {"original", *(str(i) for i in range(6))})

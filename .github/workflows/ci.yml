@@ -37,5 +37,7 @@ jobs:
       - name: Original interface and regression tests
         run: python3 -m unittest discover -s tests -v
         env:
+          TEST_CC: ${{ matrix.compiler }}
+          TEST_SANITIZE: ${{ matrix.sanitize }}
           ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
           UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
