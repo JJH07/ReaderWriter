@@ -129,7 +129,8 @@ static void next_owner(void)
 
 static void copy_log(void)
 {
-    char newLog[512];
+    /* Keep room for the longer backup basename for every accepted logPath. */
+    char newLog[sizeof(logPath) + sizeof("[0000-00-00 00:00:00]") - sizeof("ssu_log.txt")];
     struct tm value;
     time_t seconds = time(NULL);
     if (localtime_r(&seconds, &value) == NULL)
