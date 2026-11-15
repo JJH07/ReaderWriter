@@ -448,6 +448,51 @@ class OriginalContractTests(unittest.TestCase):
         self.finish(first)
         self.finish(second)
 
+    def test_waiting_client_exits_when_daemon_is_a_zombie(self):
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        # Linux PR_GET_CHILD_SUBREAPER=37, PR_SET_CHILD_SUBREAPER=36.
+        # Adopt this daemon so its zombie state is deterministic until waitpid.
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, ctypes.c_ulong(1), 0, 0, 0), 0)
+        try:
+            self.start_server()
+            self.spawn_client("first", True)
+            self.wait_for(lambda: self.started("first"))
+            waiting = self.spawn_client("waiting")
+            self.wait_for(lambda: self.log.read_text().count("Requested Process ID") == 2)
+            self.assertFalse(self.started("waiting"))
+            os.kill(self.daemon, signal.SIGTERM)
+
+            def zombie():
+                state = Path(f"/proc/{self.daemon}/stat").read_text()
+                return state.rsplit(")", 1)[1].split()[0] == "Z"
+
+            self.wait_for(zombie)
+            os.kill(self.daemon, 0)  # A PID probe still succeeds for this zombie.
+            try:
+                stdout, stderr = waiting.communicate(timeout=4)
+            except subprocess.TimeoutExpired:
+                self.fail("Client kept waiting after its daemon became a zombie")
+            self.assertEqual(waiting.returncode, 1, stdout + stderr)
+            self.assertEqual(stderr, "")
+            self.assertRegex(stdout, r"^(?:Waiting for Token\.\.\.sample\.txt\n)*$")
+            self.assertFalse(self.started("waiting"))
+            self.assertEqual(self.target.read_text(), "original\n")
+            self.assertNotIn("Finished Process ID", self.log.read_text())
+        finally:
+            try:
+                if self.daemon is not None:
+                    try:
+                        os.kill(self.daemon, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    os.waitpid(self.daemon, 0)
+                    self.daemon = None
+            finally:
+                self.assertEqual(libc.prctl(36, ctypes.c_ulong(previous.value), 0, 0, 0), 0)
+
     def test_dead_waiter_does_not_stall_queue(self):
         self.start_server()
         first = self.spawn_client("first", True)

@@ -26,6 +26,28 @@ static pid_t ofm;
 static char *filename, tempfile[] = "tempXXXXXX";
 static sigset_t signals, original_mask;
 
+static int is_zombie(pid_t pid)
+{
+    char path[64], line[4096];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *state = fopen(path, "r");
+    int zombie = 0;
+    if (state != NULL) {
+        if (fgets(line, sizeof(line), state) != NULL) {
+            char *end = strrchr(line, ')');
+            zombie = end && end[1] == ' ' && end[2] == 'Z';
+        }
+        fclose(state);
+    }
+    return zombie;
+}
+
+static int daemon_alive(void)
+{
+    /* A zombie still has a PID but can no longer grant edit permission. */
+    return kill(ofm, 0) == 0 && !is_zombie(ofm);
+}
+
 static int parse(int argc, char **argv)
 {
     if (argc < 3 || (strcmp(argv[2], "-r") != 0 && strcmp(argv[2], "-w") != 0 &&
@@ -67,21 +89,9 @@ static int parse(int argc, char **argv)
             int pid;
             while (fscanf(stream, "%d", &pid) == 1) {
                 if (pid > 0) {
-                    /* Ignore a defunct daemon left by a previous session. */
-                    char path[64], line[4096];
-                    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
-                    FILE *state = fopen(path, "r");
-                    int zombie = 0;
-                    if (state != NULL) {
-                        if (fgets(line, sizeof(line), state) != NULL) {
-                            char *end = strrchr(line, ')');
-                            zombie = end && end[1] == ' ' && end[2] == 'Z';
-                        }
-                        fclose(state);
-                    }
                     /* A process can disappear after ps captured its PID.
                      * Permission errors alone do not mean it has exited. */
-                    if (!zombie && (kill(pid, 0) == 0 || errno != ESRCH)) {
+                    if (!is_zombie(pid) && (kill(pid, 0) == 0 || errno != ESRCH)) {
                         ofm = pid;
                         break;
                     }
@@ -170,7 +180,7 @@ static int request_edit(void)
     }
     time_t last_print = 0;
     for (;;) {
-        if (kill(ofm, 0) < 0) {
+        if (!daemon_alive()) {
             close(fd);
             return -1;
         }
@@ -222,7 +232,7 @@ static int request_edit(void)
             fd = -1;
             break;
         }
-        if (kill(ofm, 0) < 0 || receive_signal(0, 10000000) < 0) {
+        if (!daemon_alive() || receive_signal(0, 10000000) < 0) {
             close(fd);
             return -1;
         }
@@ -238,7 +248,7 @@ static int request_edit(void)
         if (permission)
             break;
         waiting();
-        if (kill(ofm, 0) < 0 || receive_signal(1, 0) < 0)
+        if (!daemon_alive() || receive_signal(1, 0) < 0)
             return -1;
     }
     return 0;

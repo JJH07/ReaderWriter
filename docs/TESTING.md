@@ -32,8 +32,11 @@ python3 -m unittest discover -s tests -v
 - 허용 한계인 497바이트 로그 디렉터리에서 `-l -p` 편집 완료 후 원래 날짜 이름의 복사본 생성 및 로그 내용 일치 확인
 - 프로세스 목록의 첫 PID가 이미 사라진 경우 뒤의 실제 데몬을 선택하여 Vim 편집과 요청·완료 로그가 정상 작동하는지 확인
 - 초기 로그 쓰기 실패 시 시작 실패 문구·종료 코드·파일 보존·정상 재시작 검사 및 표준 출력이 닫힌 정상 시작·편집 검사
+- 편집 권한 대기 중 데몬이 좀비 상태가 되면 클라이언트가 실패 종료하고 파일을 보존하는지 검사; 살아 있는 데몬의 31초 이상 대기 검사도 유지
 
 ## CI
+
+2026-11-15 후속 리뷰 8번 수정: 커밋 `ebc1c94546118a1e90c38207ec198f9d5cc102cc`에서 기존 33개와 좀비 데몬 대기 검사 1개를 합한 34개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43690158818). [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43690114946)에서는 세 구성 모두 새 검사만 대기 시간 초과로 실패했습니다.
 
 2026-11-15 후속 리뷰 7번 재개 확인: 커밋 `18e30ecd64972e359f6def7ea44c42f5c5c116c7`에서 기존 31개와 초기 로그 쓰기 실패·표준 출력 닫힘 검사 2개를 합한 33개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43590715814). [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43590770589)에서는 세 구성 모두 초기 로그 쓰기 실패를 시작 성공으로 보고하는 검사만 실패했습니다.
 
