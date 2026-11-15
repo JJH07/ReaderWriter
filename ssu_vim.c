@@ -315,6 +315,11 @@ static int edit_file(void)
 
 int main(int argc, char **argv)
 {
+    /* waitpid needs child exit statuses even if the launcher ignored SIGCHLD. */
+    struct sigaction children = {.sa_handler = SIG_DFL};
+    sigemptyset(&children.sa_mask);
+    if (sigaction(SIGCHLD, &children, NULL) < 0)
+        return 1;
     if (parse(argc, argv) < 0)
         return 1;
     sigemptyset(&signals);
