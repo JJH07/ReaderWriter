@@ -652,6 +652,64 @@ static int scheduled_flock(int fd, int operation)
         self.finish(first)
         self.finish(second)
 
+    def test_fifo_replaced_after_path_check_is_rejected(self):
+        # Compile the real daemon with a deterministic filesystem swap after
+        # lstat succeeds, before setup_fifo opens the path. Product code and
+        # runtime options have no test hooks or timing-dependent sleeps.
+        build = self.root / "fifo-swap-test"
+        build.mkdir()
+        source = build / "swap.c"
+        executable = build / "ssu_ofm"
+        source.write_text(r'''
+#define _GNU_SOURCE
+#include <sys/stat.h>
+static int swapped_lstat(const char *path, struct stat *info);
+#define lstat(path, info) swapped_lstat((path), (info))
+#include "ssu_ofm.c"
+#undef lstat
+static int swapped_lstat(const char *path, struct stat *info)
+{
+    int result = lstat(path, info);
+    if (result == 0 && strcmp(path, FIFO) == 0) {
+        if (unlink(path) < 0)
+            return -1;
+        int fd = open(path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+        if (fd < 0)
+            return -1;
+        ssize_t count = write(fd, "keep\n", 5);
+        int closed = close(fd);
+        if (count != 5 || closed < 0)
+            return -1;
+    }
+    return result;
+}
+''')
+        command = [os.environ.get("TEST_CC", "gcc"), "-std=c11", "-Wall",
+                   "-Wextra", "-Wpedantic", "-Werror", "-O1", "-g"]
+        if os.environ.get("TEST_SANITIZE") == "true":
+            command += ["-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+                        "-fno-pie", "-no-pie"]
+        command += ["-I", str(ROOT), str(source), "-o", str(executable)]
+        built = subprocess.run(command, capture_output=True, text=True, timeout=20)
+        self.assertEqual(built.returncode, 0, built.stderr)
+        result = subprocess.run([str(executable), "sample.txt"], cwd=self.root,
+                                env=self.env, capture_output=True, text=True, timeout=8)
+        # Register the mistakenly started daemon before asserting, so the
+        # pre-fix reproduction is cleaned up by tearDown as well.
+        self.log = self.root / "ssu_log.txt"
+        records = self.log.read_text()
+        started = re.search(r"pid : (\d+)>>", records)
+        if started:
+            self.daemon = int(started[1])
+        replacement = self.root / "tmp" / "fifo"
+        self.assertTrue(stat.S_ISREG(replacement.stat().st_mode))
+        self.assertEqual(replacement.read_text(), "keep\n")
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(result.stdout, "Daemon Process Initialization\n")
+        self.assertEqual(result.stderr, "ssu_daemon_init failed\n")
+        self.assertEqual(records, "")
+        self.assertEqual(self.target.read_text(), "original\n")
+
     def test_existing_non_fifo_is_not_removed(self):
         (self.root / "tmp").mkdir()
         (self.root / "tmp" / "fifo").write_text("keep\n")
