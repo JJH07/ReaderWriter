@@ -524,6 +524,44 @@ class OriginalContractTests(unittest.TestCase):
             finally:
                 self.assertEqual(libc.prctl(36, ctypes.c_ulong(previous.value), 0, 0, 0), 0)
 
+    def test_killed_wrapper_keeps_running_vim_exclusive(self):
+        import fcntl
+        self.start_server()
+        first = self.spawn_client("first", True)
+        self.wait_for(lambda: self.started("first"))
+        editor = int((self.root / "started-first").read_text())
+        second = self.spawn_client("second")
+        self.wait_for(lambda: self.log.read_text().count("Requested Process ID") == 2)
+
+        first.kill()  # Kill only the wrapper, leaving its actual Vim alive.
+        first.wait(timeout=3)
+        self.assertEqual(first.returncode, -signal.SIGKILL)
+        self.assertTrue(self.process_alive(editor))
+        descriptor = os.open(self.root / "tmp", os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(descriptor)
+
+        # Let the daemon's one-second dead-owner checks run while Vim is gated.
+        time.sleep(2.2)
+        self.assertTrue(self.process_alive(editor))
+        self.assertIsNone(second.poll())
+        self.assertFalse(self.started("second"))
+        self.assertNotIn("Finished Process ID", self.log.read_text())
+        self.assertEqual(self.target.read_text(), "original\n")
+
+        self.release("first")
+        first.communicate(timeout=8)
+        self.wait_for(lambda: not self.process_alive(editor))
+        self.finish(second)
+        self.wait_for(lambda: self.log.read_text().count("Finished Process ID") == 2)
+        self.assertEqual(self.target.read_text(), "original\nfirst\nsecond\n")
+        records = self.log.read_text()
+        self.assertLess(records.index(f"Finished Process ID : {first.pid}\n"),
+                        records.index(f"Finished Process ID : {second.pid}\n"))
+
     def test_dead_waiter_does_not_stall_queue(self):
         self.start_server()
         first = self.spawn_client("first", True)
