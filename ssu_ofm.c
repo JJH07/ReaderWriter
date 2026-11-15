@@ -372,13 +372,16 @@ static int ssu_daemon_init(void)
     if (logfd != STDOUT_FILENO)
         close(logfd);
     setvbuf(stdout, NULL, _IOLBF, 0);
+    /* The launcher's stdout may have failed before this log was opened. */
+    clearerr(stdout);
     if (setup_fifo() < 0)
         _exit(1);
     if (bitset & BIT_t)
         timestamp();
     printf("<<Daemon Process Initialized with pid : %d>>\n", getpid());
     printf("Initialized with Default Value : %d\n", queuesize);
-    fflush(stdout);
+    if (fflush(stdout) == EOF || ferror(stdout))
+        _exit(1);
     if (write(ready[1], "1", 1) != 1)
         _exit(1);
     close(ready[1]);
