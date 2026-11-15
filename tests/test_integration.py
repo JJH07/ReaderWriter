@@ -155,6 +155,37 @@ class OriginalContractTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, "original\n")
 
+    def test_ignored_sigchld_does_not_turn_successful_children_into_failure(self):
+        self.start_server()
+        completed = 0
+        for mode in ("-r", "-w", "-rw"):
+            with self.subTest(mode=mode):
+                self.target.write_text("original\n")
+                os.utime(self.target, (946684800, 946684800))
+                options = [mode] if mode == "-r" else [mode, "-t", "-s", "-d"]
+                result = subprocess.run([CLIENT, "sample.txt", *options], cwd=self.root,
+                                        env=self.env, input="yes\n", text=True,
+                                        capture_output=True, timeout=15,
+                                        preexec_fn=lambda: signal.signal(signal.SIGCHLD, signal.SIG_IGN))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertNotIn("ERROR: AddressSanitizer", result.stderr)
+                self.assertNotIn("runtime error:", result.stderr)
+                if mode == "-r":
+                    self.assertEqual(result.stdout, "original\n")
+                    self.assertEqual(self.target.read_text(), "original\n")
+                else:
+                    completed += 1
+                    self.wait_for(lambda: self.log.read_text().count("Finished Process ID") == completed)
+                    self.assertEqual(self.target.read_text(), "original\nedited\n")
+                    self.assertIn("There was modification.\n", result.stdout)
+                    self.assertIn("Before modification : 9(bytes)\nAfter modification : 16(bytes)\n", result.stdout)
+                    self.assertIn("1a2\n> edited\n", result.stdout)
+                    self.assertLess(result.stdout.index("1a2\n> edited\n"),
+                                    result.stdout.index("##[Compare with Previous File]##\n"))
+                    self.assertFalse(list(self.root.glob("temp??????")))
+                    if mode == "-rw":
+                        self.assertIn("Would you like to modify 'sample.txt'? (yes/no) : ", result.stdout)
+
     def test_time_labels_and_values(self):
         result = self.run_client("-r", "-t")
         self.assertEqual(result.returncode, 0, result.stderr)
