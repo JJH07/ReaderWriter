@@ -182,8 +182,13 @@ static int setup_fifo(void)
         return -1;
     }
     fifofd = open(FIFO, O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
-    if (fifofd < 0)
+    if (fifofd < 0 || fstat(fifofd, &info) < 0)
         return -1;
+    /* The path may have changed since lstat: validate the opened object too. */
+    if (!S_ISFIFO(info.st_mode)) {
+        errno = EINVAL;
+        return -1;
+    }
     /* fcntl lock is distinct from the clients' flock request mutex on Linux. */
     struct flock lock = {.l_type = F_WRLCK, .l_whence = SEEK_SET};
     if (fcntl(fifofd, F_SETLK, &lock) < 0)
