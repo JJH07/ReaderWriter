@@ -33,8 +33,11 @@ python3 -m unittest discover -s tests -v
 - 프로세스 목록의 첫 PID가 이미 사라진 경우 뒤의 실제 데몬을 선택하여 Vim 편집과 요청·완료 로그가 정상 작동하는지 확인
 - 초기 로그 쓰기 실패 시 시작 실패 문구·종료 코드·파일 보존·정상 재시작 검사 및 표준 출력이 닫힌 정상 시작·편집 검사
 - 편집 권한 대기 중 데몬이 좀비 상태가 되면 클라이언트가 실패 종료하고 파일을 보존하는지 검사; 살아 있는 데몬의 31초 이상 대기 검사도 유지
+- `SIGCHLD` 무시 설정을 물려받은 클라이언트의 `-r`·`-w`·`-rw` 성공 종료, 실제 편집·보고·diff·완료 로그·임시 파일 정리 확인
 
 ## CI
+
+2026-11-15 후속 리뷰 9번 수정: 커밋 `9157cae5c04f7ea7df5b27bea272d65107b1bb64`에서 기존 34개와 상속된 `SIGCHLD` 무시 검사 1개를 합한 35개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43690805137). [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43690771625)에서는 세 구성 모두 새 검사의 `-r`·`-w`·`-rw` 하위 검사 세 개만 실패했습니다.
 
 2026-11-15 후속 리뷰 8번 수정: 커밋 `ebc1c94546118a1e90c38207ec198f9d5cc102cc`에서 기존 33개와 좀비 데몬 대기 검사 1개를 합한 34개 테스트가 GCC·Clang·GCC + ASan/UBSan 모두 통과했습니다. [검증 실행 기록](https://github.com/JJH07/ReaderWriter/actions/runs/43690158818). [수정 전 실행](https://github.com/JJH07/ReaderWriter/actions/runs/43690114946)에서는 세 구성 모두 새 검사만 대기 시간 초과로 실패했습니다.
 
