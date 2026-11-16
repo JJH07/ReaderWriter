@@ -18,7 +18,9 @@ VIMRC = r'''
 set nocompatible noswapfile noundofile nobackup nowritebackup
 set viminfo=
 function! TestEdit()
-  call writefile([string(getpid())], $CASE_ROOT . '/started-' . $CASE_LABEL)
+  let marker = $CASE_ROOT . '/started-' . $CASE_LABEL
+  call writefile([string(getpid())], marker . '.pending')
+  call rename(marker . '.pending', marker)
   if $CASE_GATE == '1'
     let started = reltime()
     while !filereadable($CASE_ROOT . '/gate-' . $CASE_LABEL)
