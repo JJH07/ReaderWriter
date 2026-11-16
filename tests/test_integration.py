@@ -612,6 +612,60 @@ class OriginalContractTests(unittest.TestCase):
                 self.assertLess(records.index(f"Finished Process ID : {first.pid}\n"),
                                 records.index(f"Finished Process ID : {second.pid}\n"))
 
+    def test_snapshot_write_failure_releases_queued_successor(self):
+        import resource
+
+        def limit_file_writes():
+            # Return EFBIG from the snapshot write instead of killing the
+            # client with SIGXFSZ. Only this test child inherits the limit.
+            signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+            resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+        self.start_server()
+        first = self.spawn_client("before", True)
+        self.wait_for(lambda: self.started("before"))
+        marker = self.root / "unexpected-editor"
+        # A zero-byte marker can be created even under RLIMIT_FSIZE=0, so
+        # this detects accidental Vim startup without needing a file write.
+        environment = dict(self.env, VIMINIT=f"call writefile([], '{marker}') | cquit 73")
+        failed = subprocess.Popen([CLIENT, "sample.txt", "-w", "-t", "-s", "-d"],
+                                  cwd=self.root, env=environment, stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True, start_new_session=True,
+                                  preexec_fn=limit_file_writes)
+        self.clients.append(failed)
+        self.wait_for(lambda: self.log.read_text().count("Requested Process ID") == 2)
+        successor = self.spawn_client("after", True)
+        self.wait_for(lambda: self.log.read_text().count("Requested Process ID") == 3)
+        self.assertIsNone(failed.poll())
+        self.assertFalse(self.started("after"))
+        self.release("before")
+        self.finish(first)
+
+        stdout, stderr = failed.communicate(timeout=8)
+        self.assertEqual(failed.returncode, 1, stdout + stderr)
+        self.assertEqual(stderr, "")
+        self.assertFalse(marker.exists(), "Vim ran without a complete snapshot")
+        self.assertNotIn("There was modification.", stdout)
+        self.assertNotIn("There was no modification.", stdout)
+        self.assertNotIn("##[File Size]##", stdout)
+        self.assertNotIn("##[Compare with Previous File]##", stdout)
+        self.wait_for(lambda: self.started("after"))
+        self.assertEqual(self.target.read_text(), "original\nbefore\n")
+        snapshots = list(self.root.glob("temp??????"))
+        self.assertEqual(len(snapshots), 1, "Failed copy left a temporary file")
+        self.assertEqual(snapshots[0].read_text(), "original\nbefore\n")
+        self.assertEqual(self.log.read_text().count("Finished Process ID"), 2)
+
+        self.release("after")
+        self.finish(successor)
+        self.wait_for(lambda: self.log.read_text().count("Finished Process ID") == 3)
+        self.assertEqual(self.target.read_text(), "original\nbefore\nafter\n")
+        self.assertFalse(list(self.root.glob("temp??????")))
+        records = self.log.read_text()
+        for earlier, later in ((first, failed), (failed, successor)):
+            self.assertLess(records.index(f"Finished Process ID : {earlier.pid}\n"),
+                            records.index(f"Finished Process ID : {later.pid}\n"))
+
     def test_dead_waiter_does_not_stall_queue(self):
         self.start_server()
         first = self.spawn_client("first", True)
