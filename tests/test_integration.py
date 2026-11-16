@@ -18,7 +18,9 @@ VIMRC = r'''
 set nocompatible noswapfile noundofile nobackup nowritebackup
 set viminfo=
 function! TestEdit()
-  call writefile([string(getpid())], $CASE_ROOT . '/started-' . $CASE_LABEL)
+  let marker = $CASE_ROOT . '/started-' . $CASE_LABEL
+  call writefile([string(getpid())], marker . '.pending')
+  call rename(marker . '.pending', marker)
   if $CASE_GATE == '1'
     let started = reltime()
     while !filereadable($CASE_ROOT . '/gate-' . $CASE_LABEL)
@@ -27,6 +29,9 @@ function! TestEdit()
       endif
       sleep 10m
     endwhile
+  endif
+  if $CASE_LABEL == 'failed-exit'
+    cquit 73
   endif
   if $CASE_LABEL != 'noop'
     call append(line('$'), $CASE_LABEL)
@@ -561,6 +566,51 @@ class OriginalContractTests(unittest.TestCase):
         records = self.log.read_text()
         self.assertLess(records.index(f"Finished Process ID : {first.pid}\n"),
                         records.index(f"Finished Process ID : {second.pid}\n"))
+
+    def test_failed_editor_releases_next_request_without_success_report(self):
+        self.start_server()
+        for index, failure in enumerate(("exit", "signal")):
+            with self.subTest(failure=failure):
+                self.target.write_text("original\n")
+                os.utime(self.target, (946684800, 946684800))
+                label = "failed-" + failure
+                successor = "after-" + failure
+                first = self.spawn_client(label, True, "-t", "-s", "-d")
+                self.wait_for(lambda: self.started(label))
+                editor = int((self.root / ("started-" + label)).read_text())
+                snapshots = set(self.root.glob("temp??????"))
+                self.assertEqual(len(snapshots), 1)
+                second = self.spawn_client(successor, True)
+                self.wait_for(lambda: self.log.read_text().count("Requested Process ID")
+                              == 2 * (index + 1))
+                self.assertFalse(self.started(successor))
+
+                if failure == "exit":
+                    self.release(label)
+                else:
+                    os.kill(editor, signal.SIGKILL)
+                stdout, stderr = first.communicate(timeout=8)
+                self.assertEqual(first.returncode, 1, stdout + stderr)
+                self.assertNotIn("There was modification.", stdout)
+                self.assertNotIn("There was no modification.", stdout)
+                self.assertNotIn("##[File Size]##", stdout)
+                self.assertNotIn("##[Compare with Previous File]##", stdout)
+                self.wait_for(lambda: not self.process_alive(editor))
+                self.wait_for(lambda: self.started(successor))
+                self.assertTrue(all(not path.exists() for path in snapshots))
+                self.assertEqual(self.target.read_text(), "original\n")
+                self.assertEqual(self.log.read_text().count("Finished Process ID"),
+                                 2 * index + 1)
+
+                self.release(successor)
+                self.finish(second)
+                self.wait_for(lambda: self.log.read_text().count("Finished Process ID")
+                              == 2 * (index + 1))
+                self.assertEqual(self.target.read_text(), "original\n" + successor + "\n")
+                self.assertFalse(list(self.root.glob("temp??????")))
+                records = self.log.read_text()
+                self.assertLess(records.index(f"Finished Process ID : {first.pid}\n"),
+                                records.index(f"Finished Process ID : {second.pid}\n"))
 
     def test_dead_waiter_does_not_stall_queue(self):
         self.start_server()
