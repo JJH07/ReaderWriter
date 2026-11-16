@@ -666,6 +666,48 @@ class OriginalContractTests(unittest.TestCase):
             self.assertLess(records.index(f"Finished Process ID : {earlier.pid}\n"),
                             records.index(f"Finished Process ID : {later.pid}\n"))
 
+    def test_diff_error_preserves_saved_edit_and_releases_successor(self):
+        self.start_server()
+        first = self.spawn_client("diff-error", True, "-t", "-s", "-d")
+        self.wait_for(lambda: self.started("diff-error"))
+        snapshots = list(self.root.glob("temp??????"))
+        self.assertEqual(len(snapshots), 1)
+        snapshot = snapshots[0]
+        self.assertEqual(snapshot.read_text(), "original\n")
+        # Make the comparison operand unreadable while leaving its directory
+        # entry removable. Otherwise unlink failure could mask a lost diff error.
+        snapshot.unlink()
+        snapshot.symlink_to(self.root / "missing-comparison-source")
+        probe = subprocess.run(["/usr/bin/diff", str(snapshot), str(self.target)],
+                               capture_output=True, text=True, timeout=3)
+        self.assertEqual(probe.returncode, 2, probe.stderr)
+
+        successor = self.spawn_client("after-diff", True)
+        self.wait_for(lambda: self.log.read_text().count("Requested Process ID") == 2)
+        self.assertFalse(self.started("after-diff"))
+        self.release("diff-error")
+        stdout, stderr = first.communicate(timeout=8)
+        self.assertEqual(first.returncode, 1, stdout + stderr)
+        self.assertIn(snapshot.name, stderr)
+        self.assertIn("There was modification.\n", stdout)
+        self.assertIn("Before modification : 9(bytes)\n", stdout)
+        self.assertIn("After modification : 20(bytes)\n", stdout)
+        self.assertIn("##[Compare with Previous File]##\n", stdout)
+        self.assertFalse(os.path.lexists(snapshot), "Failed diff left its temporary entry")
+        self.wait_for(lambda: self.started("after-diff"))
+        self.assertEqual(self.target.read_text(), "original\ndiff-error\n")
+        self.assertEqual(self.log.read_text().count("Finished Process ID"), 1)
+
+        self.release("after-diff")
+        self.finish(successor)
+        self.wait_for(lambda: self.log.read_text().count("Finished Process ID") == 2)
+        self.assertEqual(self.target.read_text(), "original\ndiff-error\nafter-diff\n")
+        self.assertFalse(list(self.root.glob("temp??????")))
+        self.assertFalse((self.root / "missing-comparison-source").exists())
+        records = self.log.read_text()
+        self.assertLess(records.index(f"Finished Process ID : {first.pid}\n"),
+                        records.index(f"Finished Process ID : {successor.pid}\n"))
+
     def test_dead_waiter_does_not_stall_queue(self):
         self.start_server()
         first = self.spawn_client("first", True)
