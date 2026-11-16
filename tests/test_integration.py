@@ -248,6 +248,55 @@ class OriginalContractTests(unittest.TestCase):
         self.assertIn("Initialized with Default Value : 16\n", self.log.read_text())
         self.assertFalse(list((self.root / "tmp").glob("*.sock*")))
 
+    def test_duplicate_daemon_does_not_disrupt_active_and_queued_edits(self):
+        self.start_server()
+        first = self.spawn_client("first", True)
+        self.wait_for(lambda: self.started("first"))
+        second = self.spawn_client("second")
+        self.wait_for(lambda: self.log.read_text().count("Requested Process ID") == 2)
+        fifo = self.root / "tmp" / "fifo"
+        before = fifo.stat()
+        records = self.log.read_bytes()
+        try:
+            duplicate = subprocess.run([SERVER, "sample.txt", "-n", "0"], cwd=self.root,
+                                       env=self.env, capture_output=True, text=True, timeout=8)
+            self.assertEqual(duplicate.returncode, 1, duplicate.stdout + duplicate.stderr)
+            self.assertEqual(duplicate.stdout, "Daemon Process Initialization\n")
+            self.assertEqual(duplicate.stderr, "ssu_daemon_init failed\n")
+            after = fifo.stat()
+            self.assertTrue(stat.S_ISFIFO(after.st_mode))
+            self.assertEqual((after.st_dev, after.st_ino), (before.st_dev, before.st_ino))
+            self.assertEqual(self.log.read_bytes(), records)
+            self.assertTrue(self.process_alive(self.daemon))
+            self.assertIsNone(first.poll())
+            self.assertIsNone(second.poll())
+            self.assertFalse(self.started("second"))
+            self.assertEqual(self.target.read_text(), "original\n")
+
+            third = self.spawn_client("third")
+            self.wait_for(lambda: self.log.read_text().count("Requested Process ID") == 3)
+            self.assertFalse(self.started("third"))
+            self.release("first")
+            for client in (first, second, third):
+                self.finish(client)
+            self.wait_for(lambda: self.log.read_text().count("Finished Process ID") == 3)
+            self.assertEqual(self.target.read_text(), "original\nfirst\nsecond\nthird\n")
+            records = self.log.read_text()
+            self.assertEqual(records.count("<<Daemon Process Initialized"), 1)
+            for earlier, later in ((first, second), (second, third)):
+                self.assertLess(records.index(f"Finished Process ID : {earlier.pid}\n"),
+                                records.index(f"Finished Process ID : {later.pid}\n"))
+        finally:
+            # Also clean up an incorrectly started duplicate if this guard
+            # regresses. Only PIDs recorded in this test's own log are used.
+            for pid in set(map(int, re.findall(r"pid : (\d+)>>", self.log.read_text()))):
+                if pid != self.daemon:
+                    try:
+                        os.kill(pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass
+                    self.wait_for(lambda: not self.process_alive(pid))
+
     def test_daemon_starts_with_stdin_and_stderr_closed(self):
         def close_unused_streams():
             os.close(0)
